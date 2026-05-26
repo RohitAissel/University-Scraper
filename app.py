@@ -1,6 +1,7 @@
 ﻿import io
 import json
 import re
+import subprocess
 from urllib.parse import urljoin, urlparse
 import pandas as pd
 import requests
@@ -267,20 +268,57 @@ def parse_university_urls(raw_text: str) -> list[str]:
     return urls
 
 
+def fetch_html_with_curl(url: str) -> str:
+    try:
+        result = subprocess.run(
+            [
+                "curl",
+                "-L",
+                "--max-time",
+                "30",
+                "--retry",
+                "2",
+                "--retry-delay",
+                "1",
+                "--compressed",
+                "--user-agent",
+                REQUEST_HEADERS["User-Agent"],
+                url,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("curl is not installed in this environment.") from exc
+
+    if result.returncode != 0:
+        stderr = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(f"curl failed with exit code {result.returncode}: {stderr}")
+
+    return result.stdout
+
+
 def fetch_html(url: str, enable_playwright: bool = False) -> str:
     if enable_playwright and PLAYWRIGHT_AVAILABLE:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.goto(url, wait_until="networkidle", timeout=60000)
-            page.wait_for_timeout(1500)
-            html = page.content()
-            browser.close()
-        return html
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.goto(url, wait_until="networkidle", timeout=60000)
+                page.wait_for_timeout(1500)
+                html = page.content()
+                browser.close()
+            return html
+        except Exception:
+            pass
 
-    response = requests.get(url, headers=REQUEST_HEADERS, timeout=30)
-    response.raise_for_status()
-    return response.text
+    try:
+        return fetch_html_with_curl(url)
+    except Exception:
+        response = requests.get(url, headers=REQUEST_HEADERS, timeout=30)
+        response.raise_for_status()
+        return response.text
 
 
 def clean_html_to_text(html: str) -> str:
