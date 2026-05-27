@@ -9,6 +9,8 @@ import streamlit as st
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 
+from lattes_playwright import scrape_lattes_all_records
+
 # PLAYWRIGHT SUPPORT
 
 try:
@@ -258,13 +260,14 @@ def normalize_source_url(url: str) -> str:
 
 def parse_university_urls(raw_text: str) -> list[str]:
     urls = []
-    for chunk in re.split(r"[\n,;]+", raw_text):
-        candidate = chunk.strip()
-        if not candidate:
-            continue
-        normalized = normalize_source_url(candidate)
-        if normalized:
-            urls.append(normalized)
+    for line in raw_text.splitlines():
+        for chunk in re.split(r"\s*,\s*", line):
+            candidate = chunk.strip()
+            if not candidate:
+                continue
+            normalized = normalize_source_url(candidate)
+            if normalized:
+                urls.append(normalized)
     return urls
 
 
@@ -612,6 +615,14 @@ def crawl_university(
     max_pages_per_university: int,
     on_progress,
 ):
+    if seed_url.startswith("https://buscatextual.cnpq.br/buscatextual/busca.do"):
+        on_progress("Using CNPq Playwright workflow for this URL.")
+        records, pages_visited = scrape_lattes_all_records(
+            max_pages=max_pages_per_university,
+            source_url=seed_url,
+        )
+        return records, pages_visited
+
     queue = [seed_url]
     visited = set()
     all_records = []
@@ -666,14 +677,19 @@ if analyze_clicked:
     st.session_state.total_pages_crawled = 0
     st.session_state.url_progress = {}
 
-    if not api_key_input:
-        st.error("Please enter your DeepSeek API key.")
-        st.stop()
-
     urls = parse_university_urls(university_urls_input)
 
     if not urls:
         st.error("Please enter at least one valid university URL.")
+        st.stop()
+
+    requires_deepseek = any(
+        not url.startswith("https://buscatextual.cnpq.br/buscatextual/busca.do")
+        for url in urls
+    )
+
+    if requires_deepseek and not api_key_input:
+        st.error("Please enter your DeepSeek API key.")
         st.stop()
 
     total_urls = len(urls)
@@ -726,6 +742,18 @@ if analyze_clicked:
                     f"Completed {url}: {len(records)} records across {pages_visited} page(s)."
                 )
                 progress_bar.progress(index / total_urls)
+
+        # Final dedupe across all collected records (by `id` then `bio_url`) to ensure UI/export consistency
+        unique_records = []
+        seen_ids = set()
+        for rec in st.session_state.combined_records:
+            rid = rec.get("id") or rec.get("bio_url") or (rec.get("name", "") + rec.get("title", ""))
+            if rid in seen_ids:
+                continue
+            seen_ids.add(rid)
+            unique_records.append(rec)
+
+        st.session_state.combined_records = unique_records
 
         df, json_payload, excel_bytes = build_export_payload(
             st.session_state.combined_records
